@@ -1145,7 +1145,7 @@ class Client(object):
                         yield from sub.coro(msg)
                     except Exception as e:
                         if nc._error_cb is not None:
-                            nc.__loop.create_task(nc._error_cb(e))
+                            nc._loop.create_task(nc._error_cb(e))
                         else:
                             raise
                     except asyncio.CancelledError:
@@ -1153,8 +1153,8 @@ class Client(object):
                     finally:
                         sub.pending_queue.discard(task)
 
-                params[3] = self.__loop.create_task(coro_wrap)
-
+                params[3] = self._loop.create_task(coro_wrap())
+                
             else:
                 params = [self, sub, msg, None]
 
@@ -1166,11 +1166,11 @@ class Client(object):
                         sub.cb(msg)
                     except Exception as e:
                         if nc._error_cb is not None:
-                            nc.__loop.create_task(nc._error_cb(e))
+                            nc._loop.create_task(nc._error_cb(e))
                         else:
                             raise
 
-                params[3] = nc.__loop.call_soon(cb_wrap)
+                params[3] = nc._loop.call_soon(cb_wrap)
 
     def _build_message(self, subject, reply, data):
         return self.msg_class(subject=subject.decode(), reply=reply.decode(),
