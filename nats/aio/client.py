@@ -1165,8 +1165,8 @@ class Client(object):
                         try:
                             sub.cb(msg)
                         except Exception as e:
-                             if nc._error_cb is not None:
-                                 nc.__loop.create_task(nc._error_cb((e))
+                            if nc._error_cb is not None:
+                                nc.__loop.create_task(nc._error_cb(e))
                             else:
                                 raise
 
