@@ -1145,7 +1145,7 @@ class Client(object):
                             yield from sub.coro(msg)
                         except Exception as e:
                             if nc._error_cb is not None:
-                                nc.__loop.create_task(nc._error_cb((e))
+                                nc.__loop.create_task(nc._error_cb(e))
                             else:
                                 raise
                         except asyncio.CancelledError:
