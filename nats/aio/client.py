@@ -80,7 +80,6 @@ class Subscription(object):
         self.pending_bytes_limit = None
         self.pending_queue = None
         self.pending_size = 0
-        self.wait_for_msgs_task = None
 
 class Msg(object):
     __slots__ = ('subject', 'reply', 'data', 'sid')
@@ -321,8 +320,8 @@ class Client(object):
         # to replay the subscriptions anymore.
         for i, sub in self._subs.items():
             # FIXME: Should we clear the pending queue here?
-            if sub.wait_for_msgs_task is not None and not sub.wait_for_msgs_task.done():
-                sub.wait_for_msgs_task.cancel()
+            while sub.pending_queue:
+                sub.pending_queue.pop().cancel()
         self._subs.clear()
 
         if self._io_writer is not None:
@@ -403,7 +402,7 @@ class Client(object):
 
                 # Wait until no more messages are left,
                 # then cancel the subscription task.
-                while sub.pending_queue.qsize() > 0:
+                while len(sub.pending_queue) > 0:
                     yield from asyncio.sleep(0.1, loop=nc._loop)
 
                 # Subscription is done and won't be receiving further
@@ -517,60 +516,7 @@ class Client(object):
 
             sub.pending_msgs_limit = pending_msgs_limit
             sub.pending_bytes_limit = pending_bytes_limit
-            sub.pending_queue = asyncio.Queue(
-                maxsize=pending_msgs_limit,
-                loop=self._loop,
-                )
-
-            # Close the delivery coroutine over the sub and error handler
-            # instead of having subscription type hold over state of the conn.
-            err_cb = self._error_cb
-
-            @asyncio.coroutine
-            def wait_for_msgs():
-                nonlocal sub
-                nonlocal err_cb
-
-                while True:
-                    try:
-                        msg = yield from sub.pending_queue.get()
-                        sub.pending_size -= len(msg.data)
-
-                        try:
-                            # Invoke depending of type of handler.
-                            if sub.coro is not None:
-                                if sub.is_async:
-                                    # NOTE: Deprecate this usage in a next release,
-                                    # the handler implementation ought to decide
-                                    # the concurrency level at which the messages
-                                    # should be processed.
-                                    self._loop.create_task(sub.coro(msg))
-                                else:
-                                    yield from sub.coro(msg)
-                            elif sub.cb is not None:
-                                if sub.is_async:
-                                    raise NatsError(
-                                        "nats: must use coroutine for async subscriptions")
-                                else:
-                                    # Schedule regular callbacks to be processed sequentially.
-                                    self._loop.call_soon(sub.cb, msg)
-                        except asyncio.CancelledError:
-                            # In case the coroutine handler gets cancelled
-                            # then stop task loop and return.
-                            break
-                        except Exception as e:
-                            # All errors from calling a handler
-                            # are async errors.
-                            if err_cb is not None:
-                                yield from err_cb(e)
-
-                    except asyncio.CancelledError:
-                        break
-
-            # Start task for each subscription, it should be cancelled
-            # on both unsubscribe and closing as well.
-            sub.wait_for_msgs_task = self._loop.create_task(
-                wait_for_msgs())
+            sub.pending_queue = set()
 
         elif future is not None:
             # Used to handle the single response from a request.
@@ -628,9 +574,8 @@ class Client(object):
         if max_msgs == 0 or sub.received >= max_msgs:
             self._subs.pop(ssid, None)
 
-        # Cancel task from subscription if present.
-        if sub.wait_for_msgs_task is not None and not sub.wait_for_msgs_task.done():
-            sub.wait_for_msgs_task.cancel()
+        while sub.pending_queue:
+            sub.pending_queue.pop().cancel()
 
     @asyncio.coroutine
     def _subscribe(self, sub, ssid):
@@ -675,38 +620,15 @@ class Client(object):
             # FIXME: Allow setting pending limits for responses mux subscription.
             sub.pending_msgs_limit = DEFAULT_SUB_PENDING_MSGS_LIMIT
             sub.pending_bytes_limit = DEFAULT_SUB_PENDING_BYTES_LIMIT
-            sub.pending_queue = asyncio.Queue(
-                maxsize=sub.pending_msgs_limit,
-                loop=self._loop,
-                )
+            sub.pending_queue = set()
 
-            # Single task for handling the requests
-            @asyncio.coroutine
-            def wait_for_msgs():
-                nonlocal sub
-                while True:
-                    try:
-                        msg = yield from sub.pending_queue.get()
-                        token = msg.subject[INBOX_PREFIX_LEN:]
+            def cb(msg):
+                token = msg.subject[INBOX_PREFIX_LEN:]
+                if token in self._resp_map:
+                    self._resp_map[token].set_result(msg)
+                    del self._resp_map[token]
 
-                        try:
-                            fut = self._resp_map[token]
-                            fut.set_result(msg)
-                            del self._resp_map[token]
-                        except (asyncio.CancelledError, asyncio.InvalidStateError):
-                            # Request may have timed out already so remove entry.
-                            del self._resp_map[token]
-                            continue
-                        except KeyError:
-                            # Future already handled so drop any extra
-                            # responses which may have made it.
-                            continue
-
-                    except asyncio.CancelledError:
-                        break
-
-            sub.wait_for_msgs_task = self._loop.create_task(
-                wait_for_msgs())
+            sub.cb = cb
 
             # Store the subscription in the subscriptions map,
             # then send the protocol commands to the server.
@@ -1206,11 +1128,49 @@ class Client(object):
                     yield from self._error_cb(
                         ErrSlowConsumer(subject=subject, sid=sid))
                 return
-            sub.pending_queue.put_nowait(msg)
-        except asyncio.QueueFull:
-            if self._error_cb is not None:
-                yield from self._error_cb(
-                    ErrSlowConsumer(subject=subject, sid=sid))
+            if len(sub.pending_queue) >= sub.pending_msgs_limit:
+                if self._error_cb is not None:
+                    yield from self._error_cb(
+                        ErrSlowConsumer(subject=subject, sid=sid))
+            else:
+                if sub.coro:
+
+                    params = [self, sub, msg, None]
+
+                    @asyncio.coroutine
+                    def coro_wrap(params=params):
+                        nc, sub, msg, task = params
+                        sub.pending_size -= len(msg.data)
+                        try:
+                            yield from sub.coro(msg)
+                        except Exception as e:
+                             if nc._error_cb is not None:
+                                 nc.__loop.create_task(nc._error_cb((e))
+                            else:
+                                raise
+                        except asyncio.CancelledError:
+                            pass
+                        finally:
+                            sub.pending_queue.discard(task)
+
+                    params[3] = self.__loop.create_task(coro_wrap)
+
+                else:
+                    params = [self, sub, msg, None]
+
+                    def cb_wrap(params=params):
+                        nc, sub, msg, handle = params
+                        sub.pending_size -= len(msg.data)
+                        sub.pending_queue.discard(handle)
+                        try:
+                            sub.cb(msg)
+                        except Exception as e:
+                             if nc._error_cb is not None:
+                                 nc.__loop.create_task(nc._error_cb((e))
+                            else:
+                                raise
+
+                    params[3] = call_soon(cb_wrap)
 
     def _build_message(self, subject, reply, data):
         return self.msg_class(subject=subject.decode(), reply=reply.decode(),
