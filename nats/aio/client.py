@@ -1117,60 +1117,60 @@ class Client(object):
         # Let subscription wait_for_msgs coroutine process the messages,
         # but in case sending to the subscription task would block,
         # then consider it to be an slow consumer and drop the message.
-        try:
-            sub.pending_size += payload_size
-            if sub.pending_size >= sub.pending_bytes_limit:
-                # Substract again the bytes since throwing away
-                # the message so would not be pending data.
-                sub.pending_size -= payload_size
 
-                if self._error_cb is not None:
-                    yield from self._error_cb(
-                        ErrSlowConsumer(subject=subject, sid=sid))
-                return
-            if len(sub.pending_queue) >= sub.pending_msgs_limit:
-                if self._error_cb is not None:
-                    yield from self._error_cb(
-                        ErrSlowConsumer(subject=subject, sid=sid))
+        sub.pending_size += payload_size
+        if sub.pending_size >= sub.pending_bytes_limit:
+            # Substract again the bytes since throwing away
+            # the message so would not be pending data.
+            sub.pending_size -= payload_size
+
+            if self._error_cb is not None:
+                yield from self._error_cb(
+                    ErrSlowConsumer(subject=subject, sid=sid))
+            return
+        if len(sub.pending_queue) >= sub.pending_msgs_limit:
+            if self._error_cb is not None:
+                yield from self._error_cb(
+                    ErrSlowConsumer(subject=subject, sid=sid))
+        else:
+            if sub.coro:
+
+                params = [self, sub, msg, None]
+
+                @asyncio.coroutine
+                def coro_wrap(params=params):
+                    nc, sub, msg, task = params
+                    sub.pending_size -= len(msg.data)
+                    try:
+                        yield from sub.coro(msg)
+                    except Exception as e:
+                        if nc._error_cb is not None:
+                            nc.__loop.create_task(nc._error_cb(e))
+                        else:
+                            raise
+                    except asyncio.CancelledError:
+                        pass
+                    finally:
+                        sub.pending_queue.discard(task)
+
+                params[3] = self.__loop.create_task(coro_wrap)
+
             else:
-                if sub.coro:
+                params = [self, sub, msg, None]
 
-                    params = [self, sub, msg, None]
+                def cb_wrap(params=params):
+                    nc, sub, msg, handle = params
+                    sub.pending_size -= len(msg.data)
+                    sub.pending_queue.discard(handle)
+                    try:
+                        sub.cb(msg)
+                    except Exception as e:
+                        if nc._error_cb is not None:
+                            nc.__loop.create_task(nc._error_cb(e))
+                        else:
+                            raise
 
-                    @asyncio.coroutine
-                    def coro_wrap(params=params):
-                        nc, sub, msg, task = params
-                        sub.pending_size -= len(msg.data)
-                        try:
-                            yield from sub.coro(msg)
-                        except Exception as e:
-                            if nc._error_cb is not None:
-                                nc.__loop.create_task(nc._error_cb(e))
-                            else:
-                                raise
-                        except asyncio.CancelledError:
-                            pass
-                        finally:
-                            sub.pending_queue.discard(task)
-
-                    params[3] = self.__loop.create_task(coro_wrap)
-
-                else:
-                    params = [self, sub, msg, None]
-
-                    def cb_wrap(params=params):
-                        nc, sub, msg, handle = params
-                        sub.pending_size -= len(msg.data)
-                        sub.pending_queue.discard(handle)
-                        try:
-                            sub.cb(msg)
-                        except Exception as e:
-                            if nc._error_cb is not None:
-                                nc.__loop.create_task(nc._error_cb(e))
-                            else:
-                                raise
-
-                    params[3] = call_soon(cb_wrap)
+                params[3] = nc.__loop.call_soon(cb_wrap)
 
     def _build_message(self, subject, reply, data):
         return self.msg_class(subject=subject.decode(), reply=reply.decode(),
