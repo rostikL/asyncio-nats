@@ -650,7 +650,7 @@ class Client(object):
             msg = yield from asyncio.wait_for(future, timeout, loop=self._loop)
             return msg
         except asyncio.TimeoutError:
-            future.cancel()
+            del self._resp_map[token.decode()]
             raise ErrTimeout
 
     @asyncio.coroutine
@@ -1156,6 +1156,7 @@ class Client(object):
                 params[3] = self._loop.create_task(coro_wrap())
                 
             else:
+
                 params = [self, sub, msg, None]
 
                 def cb_wrap(params=params):
@@ -1170,7 +1171,8 @@ class Client(object):
                         else:
                             raise
 
-                params[3] = nc._loop.call_soon(cb_wrap)
+                params[3] = self._loop.call_soon(cb_wrap)
+
 
     def _build_message(self, subject, reply, data):
         return self.msg_class(subject=subject.decode(), reply=reply.decode(),
