@@ -624,8 +624,9 @@ class Client(object):
 
             def cb(msg):
                 token = msg.subject[INBOX_PREFIX_LEN:]
-                if token in self._resp_map:
-                    self._resp_map[token].set_result(msg)
+                future = self._resp_map.get(token)
+                if future is not None:
+                    future.set_result(msg)
                     del self._resp_map[token]
 
             sub.cb = cb
@@ -641,17 +642,23 @@ class Client(object):
         token = self._nuid.next()
         inbox = self._resp_sub_prefix[:]
         inbox.extend(token)
-        future = asyncio.Future(loop=self._loop)
-        self._resp_map[token.decode()] = future
+        token = token.decode()
+        future = self._loop.create_future()
+        self._resp_map[token] = future
         yield from self.publish_request(subject, inbox.decode(), payload)
 
         # Wait for the response or give up on timeout.
+        done = False
         try:
             msg = yield from asyncio.wait_for(future, timeout, loop=self._loop)
-            return msg
+            done = True
         except asyncio.TimeoutError:
-            del self._resp_map[token.decode()]
             raise ErrTimeout
+        finally:
+            if not done:
+                del self._resp_map[token]
+                
+        return msg
 
     @asyncio.coroutine
     def timed_request(self, subject, payload, timeout=0.5):
