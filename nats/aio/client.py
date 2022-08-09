@@ -230,8 +230,7 @@ class Client(object):
             self.options['tls'] = tls
 
         # Queue used to trigger flushes to the socket
-        self._flush_queue = asyncio.Queue(
-            maxsize=flusher_queue_size, loop=self._loop)
+        self._flush_queue = asyncio.Queue(maxsize=flusher_queue_size)
 
         if self.options["dont_randomize"] is False:
             shuffle(self._server_pool)
@@ -298,7 +297,7 @@ class Client(object):
                         self._reconnection_task_future,
                         self.options["reconnect_time_wait"],
                         loop=self._loop,
-                        )
+                    )
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
